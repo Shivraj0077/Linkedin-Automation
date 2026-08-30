@@ -1,0 +1,18 @@
+{
+  "data": {
+    "*elements": [
+      "urn:li:fsd_profile:JANEDOE123"
+    ]
+  },
+  "included": [
+    {
+      "entityUrn": "urn:li:fsd_profile:JANEDOE123",
+      "publicIdentifier": "jane-doe",
+      "$type": "com.linkedin.voyager.dash.identity.profile.Profile",
+      "locationName": "Mumbai, Maharashtra, India",
+      "geoLocation": {
+        "geoUrn": "urn:li:fsd_geo:999999"
+      }
+    }
+  ]
+}

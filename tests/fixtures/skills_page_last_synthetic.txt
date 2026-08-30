@@ -1,0 +1,3 @@
+0:["$","div",null,{"children":["$L1","$L2"]}]
+1:["$","span",null,{"textProps":{"children":["Docker"],"fontWeight":"bold"}}]
+2:["$","span",null,{"textProps":{"children":["Kubernetes"],"fontWeight":"bold"}}]

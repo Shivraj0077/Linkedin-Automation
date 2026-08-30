@@ -1,0 +1,23 @@
+{
+  "data": {
+    "*elements": [
+      "urn:li:fsd_profile:OTHERUSER456"
+    ]
+  },
+  "included": [
+    {
+      "entityUrn": "urn:li:fsd_profile:OTHERUSER456",
+      "publicIdentifier": "someone-else",
+      "$type": "com.linkedin.voyager.dash.identity.profile.Profile",
+      "locationName": "Wrong City, Wrong Country",
+      "geoLocation": null
+    },
+    {
+      "entityUrn": "urn:li:fsd_profile:JANEDOE123",
+      "publicIdentifier": "jane-doe",
+      "$type": "com.linkedin.voyager.dash.identity.profile.Profile",
+      "locationName": "Pune, Maharashtra, India",
+      "geoLocation": null
+    }
+  ]
+}

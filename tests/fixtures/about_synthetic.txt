@@ -1,0 +1,5 @@
+0:["$","$L1",null,{"textProps":{"children":["About"]}}]
+1:["$","$L2",null,{"textProps":{"children":["Top skills"]}}]
+2:["$","$L3",null,{"textProps":{"children":["Python • FastAPI • Distributed Systems"]}}]
+3:["$","$L4",null,{"textProps":{"children":["Featured"]}}]
+4:["$","$L5",null,{"textProps":{"children":["I build backend systems and enjoy mentoring junior engineers on clean architecture."]}}]

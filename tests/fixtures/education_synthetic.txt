@@ -1,0 +1,5 @@
+0:["$","$L1",null,{"textProps":{"children":["Education"],"fontWeight":"bold"}}]
+1:["$","$L2",null,{"textProps":{"children":["Example State University"]}}]
+2:["$","$L3",null,{"textProps":{"children":["Bachelor of Science, Computer Science"]}}]
+3:["$","$L4",null,{"textProps":{"children":["Aug 2019 – May 2023"]}}]
+4:["$","$L5",null,{"textProps":{"children":["GPA: 3.8"]}}]
