@@ -5,6 +5,7 @@ Authentication values are supplied through environment variables and are
 never logged or returned in API responses.
 """
 
+import asyncio
 import json
 import secrets
 from typing import Any, Dict, Optional
@@ -39,6 +40,32 @@ def _random_b64(n_bytes: int = 16) -> str:
     return secrets.token_urlsafe(n_bytes)
 
 
+def _parse_extra_cookies(raw: str) -> Dict[str, str]:
+    """Parse a raw `name=value; name2=value2` Cookie-header string (as
+    copied verbatim from browser DevTools) into a dict.
+
+    LinkedIn's legacy Voyager API (`/voyager/api/identity/dash/profiles`)
+    applies much stricter session validation than the flagship-web RSC
+    endpoints -- a request carrying only li_at/JSESSIONID gets 302'd back
+    to itself (a checkpoint challenge) even though those same two cookies
+    are perfectly valid for every RSC call in this client. A real browser
+    session sends several more cookies alongside them (bcookie, bscookie,
+    lidc, lang, ...); this lets the operator paste that full set without
+    this codebase needing to hardcode or guess which specific names
+    LinkedIn currently requires.
+    """
+    cookies: Dict[str, str] = {}
+    for part in raw.split(";"):
+        part = part.strip()
+        if not part or "=" not in part:
+            continue
+        name, _, value = part.partition("=")
+        name = name.strip()
+        if name:
+            cookies[name] = value.strip()
+    return cookies
+
+
 class LinkedInClient:
     """
     HTTP-only client for LinkedIn's flagship-web RSC/SDUI endpoints.
@@ -49,13 +76,17 @@ class LinkedInClient:
 
         self._csrf_token = settings.jsessionid.strip('"')
 
+        cookies = _parse_extra_cookies(settings.extra_cookies)
+        # li_at/JSESSIONID are the primary session credentials and must
+        # always reflect the configured values, even if the pasted extra
+        # cookie string happens to also contain stale copies of them.
+        cookies["li_at"] = settings.li_at
+        cookies["JSESSIONID"] = f'"{self._csrf_token}"'
+
         self._client = httpx.AsyncClient(
             base_url=_BASE_URL,
             timeout=settings.request_timeout_seconds,
-            cookies={
-                "li_at": settings.li_at,
-                "JSESSIONID": f'"{self._csrf_token}"',
-            },
+            cookies=cookies,
         )
 
     async def aclose(self):
@@ -157,6 +188,68 @@ class LinkedInClient:
                 f"Refusing to call disallowed path: {path}"
             )
 
+    def _raise_for_status(self, response: httpx.Response, check_redirect: bool) -> None:
+        """Map a LinkedIn HTTP response to the matching LinkedInApiError
+        subclass. `check_redirect` is only set for GET: Voyager redirects
+        a GET (typically to a login/checkpoint page) when the session is
+        invalid/challenged, instead of returning 401/403 the way the RSC
+        endpoints do -- treated the same way rather than silently
+        returning an empty body.
+        """
+        if response.status_code in (401, 403):
+            raise AuthenticationExpiredError(
+                "LinkedIn rejected the session (401/403) - "
+                "li_at/JSESSIONID likely expired or invalid"
+            )
+        if check_redirect and 300 <= response.status_code < 400:
+            raise AuthenticationExpiredError(
+                f"LinkedIn redirected this request (HTTP {response.status_code}) - "
+                "session likely expired or requires a checkpoint"
+            )
+        if response.status_code == 404:
+            raise ProfileNotFoundError(
+                "LinkedIn returned 404 for this profile/component"
+            )
+        if response.status_code == 429:
+            raise RateLimitedError(
+                "LinkedIn rate-limited this session (429)"
+            )
+        if response.status_code >= 400:
+            raise LinkedInRequestFailedError(
+                f"LinkedIn returned HTTP {response.status_code}"
+            )
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        query: Dict[str, str],
+        headers: Dict[str, str],
+        json_body: Optional[Dict[str, Any]] = None,
+        check_redirect: bool = False,
+    ) -> str:
+        self._guard_path(path)
+
+        if not self._settings.has_credentials:
+            raise AuthenticationExpiredError(
+                "LinkedIn session credentials are not configured "
+                "(LINKEDIN_LI_AT / LINKEDIN_JSESSIONID)"
+            )
+
+        try:
+            response = await self._client.request(
+                method, path, params=query, json=json_body, headers=headers
+            )
+        except httpx.TimeoutException as exc:
+            raise LinkedInTimeoutError("Timed out calling LinkedIn") from exc
+        except httpx.HTTPError as exc:
+            raise LinkedInRequestFailedError(
+                f"Transport error calling LinkedIn: {exc}"
+            ) from exc
+
+        self._raise_for_status(response, check_redirect)
+        return response.text
+
     async def _post(
         self,
         path: str,
@@ -164,55 +257,9 @@ class LinkedInClient:
         body: Dict[str, Any],
         referer_vanity_name: str,
     ) -> str:
-
-        self._guard_path(path)
-
-        if not self._settings.has_credentials:
-            raise AuthenticationExpiredError(
-                "LinkedIn session credentials are not configured "
-                "(LINKEDIN_LI_AT / LINKEDIN_JSESSIONID)"
-            )
-
-        try:
-            response = await self._client.post(
-                path,
-                params=query,
-                json=body,
-                headers=self._headers(referer_vanity_name),
-            )
-
-        except httpx.TimeoutException as exc:
-            raise LinkedInTimeoutError(
-                "Timed out calling LinkedIn"
-            ) from exc
-
-        except httpx.HTTPError as exc:
-            raise LinkedInRequestFailedError(
-                f"Transport error calling LinkedIn: {exc}"
-            ) from exc
-
-        if response.status_code in (401, 403):
-            raise AuthenticationExpiredError(
-                "LinkedIn rejected the session (401/403) - "
-                "li_at/JSESSIONID likely expired or invalid"
-            )
-
-        if response.status_code == 404:
-            raise ProfileNotFoundError(
-                "LinkedIn returned 404 for this profile/component"
-            )
-
-        if response.status_code == 429:
-            raise RateLimitedError(
-                "LinkedIn rate-limited this session (429)"
-            )
-
-        if response.status_code >= 400:
-            raise LinkedInRequestFailedError(
-                f"LinkedIn returned HTTP {response.status_code}"
-            )
-
-        return response.text
+        return await self._request(
+            "POST", path, query, self._headers(referer_vanity_name), json_body=body
+        )
 
     async def _get(
         self,
@@ -220,74 +267,25 @@ class LinkedInClient:
         query: Dict[str, str],
         headers: Dict[str, str],
     ) -> str:
-
-        self._guard_path(path)
-
-        if not self._settings.has_credentials:
-            raise AuthenticationExpiredError(
-                "LinkedIn session credentials are not configured "
-                "(LINKEDIN_LI_AT / LINKEDIN_JSESSIONID)"
-            )
-
-        try:
-            response = await self._client.get(
-                path,
-                params=query,
-                headers=headers,
-            )
-
-        except httpx.TimeoutException as exc:
-            raise LinkedInTimeoutError(
-                "Timed out calling LinkedIn"
-            ) from exc
-
-        except httpx.HTTPError as exc:
-            raise LinkedInRequestFailedError(
-                f"Transport error calling LinkedIn: {exc}"
-            ) from exc
-
-        if response.status_code in (401, 403):
-            raise AuthenticationExpiredError(
-                "LinkedIn rejected the session (401/403) - "
-                "li_at/JSESSIONID likely expired or invalid"
-            )
-
-        if 300 <= response.status_code < 400:
-            # Voyager redirects a GET (typically to a login/checkpoint
-            # page) when the session is invalid/challenged, rather than
-            # returning 401/403 the way the RSC endpoints do -- treat it
-            # the same way rather than silently returning an empty body.
-            raise AuthenticationExpiredError(
-                f"LinkedIn redirected this request (HTTP {response.status_code}) - "
-                "session likely expired or requires a checkpoint"
-            )
-
-        if response.status_code == 404:
-            raise ProfileNotFoundError(
-                "LinkedIn returned 404 for this profile/component"
-            )
-
-        if response.status_code == 429:
-            raise RateLimitedError(
-                "LinkedIn rate-limited this session (429)"
-            )
-
-        if response.status_code >= 400:
-            raise LinkedInRequestFailedError(
-                f"LinkedIn returned HTTP {response.status_code}"
-            )
-
-        return response.text
+        return await self._request("GET", path, query, headers, check_redirect=True)
 
     async def get_profile_identity(self, vanity_name: str) -> str:
         """
         Fetch the Voyager identity-profile response for a vanity name.
 
-        Used only as a fallback source for fields the RSC/SDUI
-        profileCardsAboveActivity response does not reliably expose
-        (currently: profile-level location) -- see
-        app.linkedin.parser.extract_profile_location. Does not replace
-        or alter any existing RSC-based fetch.
+        Used as a fallback source for fields the RSC/SDUI
+        profileCardsAboveActivity/profileCardsActivity responses don't
+        reliably expose (location always; name/headline/about/photo/
+        member_id when the activity feed has no content to render) --
+        see app.linkedin.parser.extract_profile_location and
+        extract_voyager_identity_fields. Does not replace or alter any
+        existing RSC-based fetch.
+
+        Retries once on a redirect (observed, repeatedly, to flip from
+        failing to succeeding again within seconds for the same
+        vanity_name/session -- a transient checkpoint challenge on this
+        specific endpoint, not a hard session failure) before giving up
+        and letting the caller degrade gracefully.
         """
 
         query = {
@@ -299,11 +297,19 @@ class LinkedInClient:
             ),
         }
 
-        return await self._get(
-            "/voyager/api/identity/dash/profiles",
-            query,
-            self._voyager_headers(vanity_name),
-        )
+        try:
+            return await self._get(
+                "/voyager/api/identity/dash/profiles",
+                query,
+                self._voyager_headers(vanity_name),
+            )
+        except AuthenticationExpiredError:
+            await asyncio.sleep(1.5)
+            return await self._get(
+                "/voyager/api/identity/dash/profiles",
+                query,
+                self._voyager_headers(vanity_name),
+            )
 
     async def get_component(
         self,

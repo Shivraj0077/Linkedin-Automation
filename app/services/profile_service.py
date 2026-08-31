@@ -7,6 +7,7 @@ still wrapped defensively -- a parse failure or schema change in one
 section degrades that section to empty/None rather than failing the
 whole request (assignment requirement #20).
 """
+import asyncio
 import logging
 from typing import Optional
 
@@ -19,13 +20,14 @@ from app.linkedin.parser import (
     extract_experience_entries,
     extract_profile_image,
     extract_profile_location,
+    extract_voyager_identity_fields,
     extract_skills,
     extract_honors_awards,
     safe_parse_component,
     _walk_literal_strings,
 )
 from app.linkedin.sdui import extract_profile_id_from_component_refs
-from app.models.profile import DataConfidence, Profile
+from app.models.profile import DataConfidence, Profile, ProfileImage
 
 
 logger = logging.getLogger(__name__)
@@ -33,6 +35,18 @@ logger = logging.getLogger(__name__)
 _ABOVE_ACTIVITY = "com.linkedin.sdui.generated.profile.dsl.impl.profileCardsAboveActivity"
 _ACTIVITY = "com.linkedin.sdui.generated.profile.dsl.impl.profileCardsActivity"
 _BELOW_PART1 = "com.linkedin.sdui.generated.profile.dsl.impl.profileCardsBelowActivityPart1WithoutExp"
+
+# LinkedIn's activity-feed component renders a literal collapsed
+# placeholder (`children: [false, null]`, ~135 bytes) on some requests
+# and full feed content (megabytes) on the very next, otherwise
+# identical request -- observed repeatedly, for the same vanity_name
+# and session, seconds apart. Any real feed render is many KB+, so a
+# response shorter than this is unambiguously the placeholder, never a
+# real-but-small feed -- safe to retry on, unlike e.g. "About" coming
+# back empty, which can legitimately mean the profile has no About
+# section at all.
+_EMPTY_ACTIVITY_RESPONSE_MAX_LEN = 500
+_ACTIVITY_RETRY_DELAY_SECONDS = 1.5
 
 
 async def build_profile(
@@ -51,6 +65,17 @@ async def build_profile(
     activity_raw = None
     try:
         activity_raw = await client.get_component(_ACTIVITY, vanity_name)
+        if activity_raw is not None and len(activity_raw) < _EMPTY_ACTIVITY_RESPONSE_MAX_LEN:
+            logger.info(
+                "Activity fetch for %s looked like the collapsed empty-state "
+                "placeholder (%d bytes) -- retrying once",
+                vanity_name,
+                len(activity_raw),
+            )
+            await asyncio.sleep(_ACTIVITY_RETRY_DELAY_SECONDS)
+            retry_raw = await client.get_component(_ACTIVITY, vanity_name)
+            if retry_raw and len(retry_raw) >= _EMPTY_ACTIVITY_RESPONSE_MAX_LEN:
+                activity_raw = retry_raw
         name, headline = extract_best_effort_name_and_headline(activity_raw)
         if name:
             profile.name = name
@@ -105,6 +130,7 @@ async def build_profile(
     # because profileCardsAboveActivity does not reliably surface
     # location (see ENDPOINT_MAP.md #2 for the analogous name/headline
     # gap). Never derived from experience/education/company text.
+    identity_raw = None
     try:
         identity_raw = await client.get_profile_identity(vanity_name)
         profile.location = extract_profile_location(identity_raw, vanity_name)
@@ -113,6 +139,42 @@ async def build_profile(
     except LinkedInApiError as exc:
         logger.warning("Voyager identity fetch failed for %s: %s", vanity_name, exc)
         confidence.location = "unavailable"
+
+    # --- Name/headline/about/photo backfill from the same Voyager response -
+    # The activity-feed byline and aboveActivity About section above are
+    # only present when LinkedIn renders that content for this profile
+    # in this specific request -- confirmed (by repeated identical
+    # requests against the same profile) to legitimately come back empty
+    # on one call and populated on the next, both as real 200s, not
+    # errors. Voyager carries these fields directly on the profile
+    # entity regardless of that variability, so it's used here ONLY to
+    # fill in whatever the activity/aboveActivity paths didn't recover
+    # -- never to override a value already found there, and neither of
+    # those paths is altered.
+    if identity_raw:
+        voyager_identity = extract_voyager_identity_fields(identity_raw, vanity_name)
+        if voyager_identity:
+            if not profile.name and voyager_identity.get("name"):
+                profile.name = voyager_identity["name"]
+                profile.first_name = voyager_identity.get("first_name")
+                profile.last_name = voyager_identity.get("last_name")
+                confidence.name = "verified"
+            if not profile.headline and voyager_identity.get("headline"):
+                profile.headline = voyager_identity["headline"]
+                confidence.headline = "verified"
+            if not profile.about and voyager_identity.get("about"):
+                profile.about = voyager_identity["about"]
+                confidence.about = "verified"
+            if not profile.profile_image and voyager_identity.get("profile_image"):
+                image = voyager_identity["profile_image"]
+                profile.profile_image = ProfileImage(url=image["url"], root_url=image["root_url"])
+                confidence.profile_image = "verified"
+            # member_id has no RSC/SDUI source at all (see
+            # ENDPOINT_MAP.md) -- Voyager's objectUrn is the only place
+            # this codebase can recover it from, so it's set outright
+            # rather than gated behind "if not already set".
+            if voyager_identity.get("member_id"):
+                profile.member_id = voyager_identity["member_id"]
 
     # --- Education (CONFIRMED, 4th capture) ---------------------------------
     try:

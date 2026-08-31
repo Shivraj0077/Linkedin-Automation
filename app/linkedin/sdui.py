@@ -6,7 +6,8 @@ HAR captures — see /ENDPOINT_MAP.md at the repo root for exactly which
 component each of these was pulled from and how confident the shape is.
 Where the HAR did not capture enough to confirm a field shape, the
 function returns an empty result rather than guessing (see
-`extract_experience`, `extract_education`, `extract_top_card` below).
+`extract_experience`, `extract_name_and_headline_from_activity`,
+`extract_profile_image_asset` below).
 
 Design note: LinkedIn's internal component tree WILL change over time.
 Each extractor is independent and defensive (try/except around each
@@ -72,12 +73,11 @@ def extract_skills_page(document: RscDocument) -> List[Dict[str, Optional[str]]]
     name, and the very next "normal" text node in document order is the
     job/context line under which the skill is listed (e.g. "Technical
     Lead at VYOMA LEARNING SYSTEMS Pvt. Ltd.") — NOT an endorsement
-    count as originally assumed. Re-tested against rsc2_19_skills.txt:
-    walking from the tree root never surfaced an "Endorsed by ..." node
-    adjacent to a skill name, even though that text exists elsewhere in
-    the same raw payload (see extract_unattributed_endorsement_texts) —
-    so endorsement_count is intentionally left unset here rather than
-    guessed at by proximity.
+    count as originally assumed (see ENDPOINT_MAP.md #12): "Endorsed
+    by ..." text exists elsewhere in the raw payload but is never
+    adjacent to a skill name when walked from the tree root, so
+    endorsement_count is intentionally left unset rather than guessed
+    at by proximity.
     """
     results: List[Dict[str, Optional[str]]] = []
     pending_name: Optional[str] = None
@@ -95,42 +95,6 @@ def extract_skills_page(document: RscDocument) -> List[Dict[str, Optional[str]]]
         results.append({"name": pending_name, "context": None})
 
     return results
-
-
-def extract_unattributed_endorsement_texts(document: RscDocument) -> List[str]:
-    """Best-effort, NOT attributed to a specific skill. "Endorsed by ..."
-    text nodes exist in the raw skills-pagination payload but were not
-    reachable from the tree root alongside their skill name in the
-    capture analyzed — see extract_skills_page docstring. Exposed
-    separately so callers can surface the raw counts without falsely
-    claiming which skill each belongs to.
-    """
-    out = []
-    for node_id in document.ids():
-        raw = document.raw(node_id)
-        s = str(raw)
-        for m in re.finditer(r'"([^"]{0,5}Endorsed by [^"]{0,80})"', s):
-            if m.group(1) not in out:
-                out.append(m.group(1))
-    return out
-
-
-def find_section_anchor_ids(document: RscDocument, observability_id: str) -> List[str]:
-    """Find node ids whose raw payload contains the given
-    observabilityIdentifier (e.g.
-    'com.linkedin.sdui.impl.profile.components.educationTopLevelSection').
-    Confirmed present in profileCardsBelowActivityPart1WithoutActivity
-    responses (ENDPOINT_MAP.md #4) as a marker of section boundaries,
-    but the HAR did not capture enough of the surrounding tree to
-    confirm field-level structure (institution/degree/dates) below that
-    anchor — see extract_education().
-    """
-    matches = []
-    for node_id in document.ids():
-        raw = document.raw(node_id)
-        if raw is not None and observability_id in str(raw):
-            matches.append(node_id)
-    return matches
 
 
 _BYLINE_RE = re.compile(r'"aria-label":"([A-Za-z][^"]{2,60}?) Premium Profile[^"]*"')
@@ -365,9 +329,8 @@ def extract_profile_image_asset(
         if above_doc is not None:
             # Not every node is reachable purely by resolving from "0" --
             # RSC flight streams contain many independently-rooted
-            # top-level chunks (see rsc.find_all_text, which walks every
-            # id for the same reason) -- so each id is checked as its
-            # own traversal root.
+            # top-level chunks -- so each id is checked as its own
+            # traversal root.
             for node_id in above_doc.ids():
                 found = _find_circle_image_asset(above_doc.resolve(node_id))
                 if found is not None:
@@ -607,7 +570,6 @@ def extract_profile_id_from_component_refs(raw_text: Optional[str]) -> Optional[
 
 
 _SKILLS_FOR_RE = re.compile(r'"title":"Skills for ([^"]{2,150})"')
-_LOGO_ALT_RE = re.compile(r'"aria-label":"([^"]{2,100}) logo"')
 
 
 def extract_skills_for_entities(raw_text: Optional[str]) -> List[Dict[str, Optional[str]]]:
@@ -623,9 +585,7 @@ def extract_skills_for_entities(raw_text: Optional[str]) -> List[Dict[str, Optio
     entity name(s) we actually want, in a place a simple render-tree
     text walk (_walk_text_nodes) does not reach. Company names are
     also independently visible as logo `aria-label`s ("<Company>
-    logo") but not every entity has a logo, so this is the primary
-    extraction path and extract_logo_alt_texts() is a supplementary
-    cross-check only.
+    logo"), but not every entity has a logo.
 
     Operates on the raw decoded text directly (regex over the full
     string), not the parsed node tree, matching how this was actually
@@ -646,22 +606,3 @@ def extract_skills_for_entities(raw_text: Optional[str]) -> List[Dict[str, Optio
     return out
 
 
-def extract_logo_alt_texts(raw_text: Optional[str]) -> List[str]:
-    """Supplementary cross-check only -- see extract_skills_for_entities.
-    Not every experience/education entry has a logo, so this list is
-    frequently shorter than the entity list and must not be assumed to
-    align 1:1 with it."""
-    return [m.group(1).strip() for m in _LOGO_ALT_RE.finditer(raw_text or "")]
-
-
-def extract_date_location_lines(document) -> List[str]:
-    """CONFIRMED shape: plain 'normal'-weight text nodes under Experience
-    and Education sections are exclusively date ranges (e.g.
-    "Jul 2026 - Present . 2 mos") and location/type strings (e.g.
-    "Ahmedabad, Gujarat, India . Hybrid"), in that alternating order in
-    every capture analyzed. No entity name ever appears in this list --
-    see extract_skills_for_entities for names.
-    """
-    if document is None:
-        return []
-    return [text for weight, text in _walk_text_nodes(document) if weight == "normal"]

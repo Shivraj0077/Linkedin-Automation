@@ -1,0 +1,41 @@
+{
+  "data": {
+    "*elements": [
+      "urn:li:fsd_profile:JANEDOE123"
+    ]
+  },
+  "included": [
+    {
+      "entityUrn": "urn:li:fsd_profile:JANEDOE123",
+      "publicIdentifier": "jane-doe",
+      "$type": "com.linkedin.voyager.dash.identity.profile.Profile",
+      "firstName": "Jane",
+      "lastName": "Doe",
+      "headline": "Backend Engineer @Example",
+      "locationName": null,
+      "geoLocation": null,
+      "profilePicture": {
+        "displayImageReference": {
+          "vectorImage": {
+            "rootUrl": "https://media.licdn.com/dms/image/v2/EXAMPLEID/profile-displayphoto-",
+            "artifacts": [
+              {
+                "width": 100,
+                "height": 100,
+                "fileIdentifyingUrlPathSegment": "100_100/profile-displayphoto-shrink_100_100/0/1700000000000?e=1800000000&v=beta&t=tokenA"
+              },
+              {
+                "width": 800,
+                "height": 800,
+                "fileIdentifyingUrlPathSegment": "800_800/profile-displayphoto-shrink_800_800/0/1700000000000?e=1800000000&v=beta&t=tokenB"
+              }
+            ]
+          }
+        },
+        "displayImageUrn": "urn:li:digitalmediaAsset:EXAMPLEID"
+      },
+      "summary": "I build backend systems and enjoy mentoring engineers.",
+      "objectUrn": "urn:li:member:10138250"
+    }
+  ]
+}

@@ -16,9 +16,8 @@ from app.linkedin.rsc import parse_rsc_stream
 from app.linkedin.sdui import (
     extract_name_and_headline_from_activity,
     extract_skills_page,
-    find_section_anchor_ids,
 )
-from app.models.profile import EducationEntry, ExperienceEntry, SkillEntry
+from app.models.profile import EducationEntry, ExperienceEntry, HonorAwardEntry, SkillEntry
 
 logger = logging.getLogger(__name__)
 
@@ -37,87 +36,65 @@ def safe_parse_component(raw_text: Optional[str], label: str):
 
 
 def extract_education(document, raw_text: Optional[str] = None) -> List["EducationEntry"]:
-    """CONFIRMED shape (4th HAR capture; see ENDPOINT_MAP.md #4, updated).
-    Verified against a real 2-entry response: LinkedIn renders each
-    education block as a fixed sequence of 4 literal strings, in order:
+    """CONFIRMED shape (4th HAR capture; see ENDPOINT_MAP.md #4). LinkedIn
+    renders each education block as a fixed sequence of literal strings:
 
-        1. Institution name     e.g. "L.D. College of Engineering"
-        2. "<Degree>, <Field>"  e.g. "Bachelor of Engineering, Information Technology"
-        3. "<DateRange>"        e.g. "Jul 2024 \u2013 Jul 2028"
-        4. Grade line           e.g. "SPI : 8.33" (kept as raw grade text, not parsed further)
+        1. Institution name      e.g. "L.D. College of Engineering"
+        2. "<Degree>, <Field>"   e.g. "Bachelor of Engineering, Information Technology"
+        3. "<DateRange>"         e.g. "Jul 2024 \u2013 Jul 2028"
+        4. Grade line (optional) e.g. "SPI : 8.33" -- consumed to stay
+           aligned with the next entry, but not stored (no model field).
 
-    `raw_text` is the preferred input now (positional literal-string
-    parsing, same approach as extract_experience) -- pass the decoded
-    RSC text directly. The old `document`-based (RscDocument) path is
-    kept as a fallback for callers still on the earlier capture, and
-    returns date-ranges-only entries with institution=None, matching
-    its documented lower-confidence behaviour from before this update.
+    `document` is unused; kept as the first parameter so callers can pass
+    an `RscDocument` positionally like the other extractors. Education is
+    only ever recoverable from `raw_text`, which every caller supplies
+    (see profile_service.build_profile) -- this returns [] without it.
     """
-    from app.models.profile import EducationEntry
-
-    if raw_text:
-        from app.linkedin.sdui import _CHILDREN_LITERAL_RE, _DATE_RANGE_RE
-
-        literals = [v for v in _CHILDREN_LITERAL_RE.findall(raw_text) if not v.startswith("$")]
-        literals = [s for s in literals if s.strip() != "Education"]
-
-        entries: List[EducationEntry] = []
-        i = 0
-        while i + 2 < len(literals):
-            institution = literals[i]
-            degree_line = literals[i + 1]
-            date_line = literals[i + 2]
-
-            if not _DATE_RANGE_RE.match(date_line):
-                break
-
-            grade = None
-            consumed = 3
-            if i + 3 < len(literals) and not _DATE_RANGE_RE.match(literals[i + 3]):
-                # Heuristic: a 4th literal that isn't itself a date range
-                # (i.e. not the *next* entry's date) is this entry's
-                # grade/notes line. If it IS date-shaped, it must belong
-                # to the next entry (rare: entry with no grade line).
-                nxt = literals[i + 3]
-                if not (i + 4 < len(literals) and _looks_like_institution_pair(nxt, literals[i + 4] if i + 4 < len(literals) else "")):
-                    grade = nxt
-                    consumed = 4
-
-            degree, _, field_of_study = degree_line.partition(", ")
-            from app.utils.dates import split_date_range
-            start_date, end_date = split_date_range(date_line)
-
-            entries.append(
-                EducationEntry(
-                    institution=institution.strip() if institution else None,
-                    degree=degree.strip() if degree else None,
-                    field_of_study=field_of_study.strip() if field_of_study else None,
-                    start_date=start_date,
-                    end_date=end_date,
-                )
-            )
-            i += consumed
-
-        return entries
-
-    # --- fallback path for the earlier (pre-4th-capture) fixture ----------
-    if document is None:
+    if not raw_text:
         return []
-    anchors = find_section_anchor_ids(document, "educationTopLevelSection")
-    if not anchors:
-        return []
+
+    from app.linkedin.sdui import _CHILDREN_LITERAL_RE, _DATE_RANGE_RE
     from app.utils.dates import split_date_range
 
-    out: List[EducationEntry] = []
-    for weight, text in _walk_text_nodes(document):
-        if weight != "normal":
-            continue
-        if text.strip().lower() in _SECTION_HEADER_WORDS:
-            continue
-        start, end = split_date_range(text)
-        if start or end:
-            out.append(EducationEntry(start_date=start, end_date=end))
-    return out
+    literals = [v for v in _CHILDREN_LITERAL_RE.findall(raw_text) if not v.startswith("$")]
+    literals = [s for s in literals if s.strip() != "Education"]
+
+    entries: List[EducationEntry] = []
+    i = 0
+    while i + 2 < len(literals):
+        institution = literals[i]
+        degree_line = literals[i + 1]
+        date_line = literals[i + 2]
+
+        if not _DATE_RANGE_RE.match(date_line):
+            break
+
+        consumed = 3
+        if i + 3 < len(literals) and not _DATE_RANGE_RE.match(literals[i + 3]):
+            # A 4th literal that isn't itself a date range is this entry's
+            # grade/notes line -- UNLESS it plausibly starts the *next*
+            # entry's (institution, degree) pair, in which case it's left
+            # for the next iteration instead of being consumed here.
+            nxt = literals[i + 3]
+            nxt2 = literals[i + 4] if i + 4 < len(literals) else ""
+            if not _looks_like_institution_pair(nxt, nxt2):
+                consumed = 4
+
+        degree, _, field_of_study = degree_line.partition(", ")
+        start_date, end_date = split_date_range(date_line)
+
+        entries.append(
+            EducationEntry(
+                institution=institution.strip() if institution else None,
+                degree=degree.strip() if degree else None,
+                field_of_study=field_of_study.strip() if field_of_study else None,
+                start_date=start_date,
+                end_date=end_date,
+            )
+        )
+        i += consumed
+
+    return entries
 
 
 def _looks_like_institution_pair(a: str, b: str) -> bool:
@@ -126,14 +103,6 @@ def _looks_like_institution_pair(a: str, b: str) -> bool:
     entry's grade line, something else). Used only to avoid
     mis-consuming a 4th slot in rare cases with no grade line."""
     return ", " in b or "Bachelor" in b or "Master" in b or "Diploma" in b
-
-
-_SECTION_HEADER_WORDS = {
-    "education", "certifications", "certification", "projects", "project",
-    "volunteering", "volunteer experience", "connected accounts", "skills",
-    "languages", "organizations", "recommendations", "honors & awards",
-    "honors and awards", "publications", "patents", "courses", "test scores",
-}
 
 
 def extract_skills(pages_raw: List[str]) -> List[SkillEntry]:
@@ -261,6 +230,32 @@ def extract_profile_location(
     unrelated data and would misattribute a company's or a former
     employer's location to the profile.
     """
+    parsed = _load_voyager_profile_entity(raw_text, vanity_name)
+    if parsed is None:
+        return None
+    profile_entity, included = parsed
+
+    location_name = profile_entity.get("locationName")
+    if isinstance(location_name, str) and location_name.strip():
+        return location_name.strip()
+
+    geo_location = profile_entity.get("geoLocation")
+    if isinstance(geo_location, dict):
+        geo_urn = geo_location.get("geoUrn")
+        if isinstance(geo_urn, str) and geo_urn:
+            geo_entity = _voyager_entity_by_urn(included, geo_urn)
+            if isinstance(geo_entity, dict):
+                localized_name = geo_entity.get("defaultLocalizedName")
+                if isinstance(localized_name, str) and localized_name.strip():
+                    return localized_name.strip()
+
+    return None
+
+
+def _load_voyager_profile_entity(raw_text: Optional[str], vanity_name: str):
+    """Shared decode + entity-lookup step for every Voyager
+    identity-profile extractor (location, name/headline/photo
+    backfill). Returns (profile_entity, included_list) or None."""
     import json
 
     if not raw_text:
@@ -285,21 +280,122 @@ def extract_profile_location(
     if profile_entity is None:
         return None
 
-    location_name = profile_entity.get("locationName")
-    if isinstance(location_name, str) and location_name.strip():
-        return location_name.strip()
+    return profile_entity, included
 
-    geo_location = profile_entity.get("geoLocation")
-    if isinstance(geo_location, dict):
-        geo_urn = geo_location.get("geoUrn")
-        if isinstance(geo_urn, str) and geo_urn:
-            geo_entity = _voyager_entity_by_urn(included, geo_urn)
-            if isinstance(geo_entity, dict):
-                localized_name = geo_entity.get("defaultLocalizedName")
-                if isinstance(localized_name, str) and localized_name.strip():
-                    return localized_name.strip()
 
-    return None
+def extract_voyager_identity_fields(
+    raw_text: Optional[str], vanity_name: str
+) -> Optional[Dict[str, Any]]:
+    """Backfill-only name/headline/profile-image extraction from the
+    same Voyager identity-profile response used by
+    `extract_profile_location`.
+
+    This exists because the RSC activity-feed byline (see
+    `extract_best_effort_name_and_headline`) and the aboveActivity About
+    section (see `extract_about`) are only present when LinkedIn renders
+    that content for the profile in that specific request -- both
+    observed to legitimately come back empty on a real 200 (activity:
+    `children: [false, null]`; aboveActivity: no About text present in
+    the stream at all) on some requests and populated on others, for
+    the exact same profile and vanity_name, from one call to the next.
+    Voyager's profile entity carries `firstName`/`lastName`/`headline`/
+    `summary`/`profilePicture` directly, structurally, regardless of
+    that feed/render variability -- a strictly more reliable source
+    when Voyager itself is reachable. This function does NOT replace or
+    alter the activity-feed/aboveActivity paths; callers only use its
+    result to fill in fields those paths could not recover, never to
+    override a value already found there.
+
+    Returns {"name", "first_name", "last_name", "headline", "about",
+    "profile_image": {"url", "root_url"} | None} or None if the profile
+    entity itself could not be located.
+    """
+    parsed = _load_voyager_profile_entity(raw_text, vanity_name)
+    if parsed is None:
+        return None
+    profile_entity, _included = parsed
+
+    first_name = profile_entity.get("firstName")
+    first_name = first_name.strip() if isinstance(first_name, str) and first_name.strip() else None
+
+    last_name = profile_entity.get("lastName")
+    last_name = last_name.strip() if isinstance(last_name, str) and last_name.strip() else None
+
+    headline = profile_entity.get("headline")
+    headline = headline.strip() if isinstance(headline, str) and headline.strip() else None
+
+    about = profile_entity.get("summary")
+    about = about.strip() if isinstance(about, str) and about.strip() else None
+
+    name = None
+    if first_name:
+        name = f"{first_name} {last_name}" if last_name else first_name
+
+    return {
+        "name": name,
+        "first_name": first_name,
+        "last_name": last_name,
+        "headline": headline,
+        "about": about,
+        "member_id": _voyager_member_id_from_entity(profile_entity),
+        "profile_image": _voyager_profile_image_from_entity(profile_entity),
+    }
+
+
+def _voyager_member_id_from_entity(profile_entity: Dict[str, Any]) -> Optional[str]:
+    """The numeric member id, read from the profile entity's own
+    `objectUrn` field (e.g. "urn:li:member:10138250") -- LinkedIn's
+    only exposure of this id anywhere in the response. No other source
+    in this codebase provides it (not derivable from the RSC/SDUI
+    endpoints, which only ever expose the URN-encoded `profile_id`,
+    a different identifier)."""
+    object_urn = profile_entity.get("objectUrn")
+    if not isinstance(object_urn, str):
+        return None
+    prefix = "urn:li:member:"
+    if not object_urn.startswith(prefix):
+        return None
+    member_id = object_urn[len(prefix):]
+    return member_id if member_id else None
+
+
+def _voyager_profile_image_from_entity(
+    profile_entity: Dict[str, Any]
+) -> Optional[Dict[str, Optional[str]]]:
+    """Structurally build a complete image URL from the Voyager
+    profile entity's own `profilePicture.displayImageReference.
+    vectorImage` field -- `rootUrl` + the highest-resolution
+    `artifacts[].fileIdentifyingUrlPathSegment`, concatenated exactly
+    as LinkedIn supplied them (same discipline as
+    sdui._build_image_from_client_image_asset: never inventing a CDN
+    path/id/timestamp/token). Returns None if those fields are absent.
+    """
+    picture = profile_entity.get("profilePicture")
+    if not isinstance(picture, dict):
+        return None
+    display_ref = picture.get("displayImageReference")
+    if not isinstance(display_ref, dict):
+        return None
+    vector_image = display_ref.get("vectorImage")
+    if not isinstance(vector_image, dict):
+        return None
+
+    root_url = vector_image.get("rootUrl")
+    artifacts = vector_image.get("artifacts")
+    if not isinstance(root_url, str) or not root_url or not isinstance(artifacts, list):
+        return None
+
+    valid = [
+        a for a in artifacts
+        if isinstance(a, dict)
+        and isinstance(a.get("fileIdentifyingUrlPathSegment"), str)
+        and a.get("fileIdentifyingUrlPathSegment")
+    ]
+    if not valid:
+        return None
+
+    best = max(valid, key=lambda a: a.get("width") or 0)
+    return {"url": root_url + best["fileIdentifyingUrlPathSegment"], "root_url": root_url}
 
 
 def extract_profile_image(
@@ -365,11 +461,8 @@ def _walk_literal_strings(document):
 
     yield from walk(document.resolve("0"))
 
-def extract_honors_awards(
-    pages_raw: List[str],
-) -> List["HonorAwardEntry"]:
-    """
-    Parse LinkedIn Honors & Awards pagination responses.
+def extract_honors_awards(pages_raw: List[str]) -> List[HonorAwardEntry]:
+    """Parse LinkedIn Honors & Awards pagination responses.
 
     Captured response structure renders each item as:
 
@@ -384,7 +477,6 @@ def extract_honors_awards(
     The values above are examples only and are never hardcoded.
     """
 
-    from app.models.profile import HonorAwardEntry
     from app.linkedin.sdui import _CHILDREN_LITERAL_RE
 
     results = []

@@ -117,6 +117,7 @@ def parse_rsc_stream(raw_text: str) -> RscDocument:
     return RscDocument(nodes)
 
 
+
 def _parse_payload(payload: str) -> Any:
     payload = payload.strip()
     if not payload:
@@ -136,39 +137,3 @@ def _parse_payload(payload: str) -> Any:
         return json.loads(payload)
     except json.JSONDecodeError:
         return {"$raw": payload}
-
-
-def find_all_text(document: RscDocument, min_len: int = 2, max_len: int = 300):
-    """Yield every literal string value found anywhere in the resolved
-    tree, across all root nodes. This is the fallback extraction path
-    used by parser.py for sections whose exact field structure is
-    UNKNOWN (see ENDPOINT_MAP.md) — it recovers rendered text without
-    assuming a schema, at the cost of losing which field a string came
-    from. Prefer targeted extraction (by key name) wherever the schema
-    is confirmed; use this only as a documented fallback.
-    """
-    seen_strings = []
-
-    def walk(value):
-        if isinstance(value, str):
-            s = value.strip()
-            if min_len <= len(s) <= max_len and not s.startswith("$") and not s.startswith("proto."):
-                seen_strings.append(s)
-        elif isinstance(value, list):
-            for v in value:
-                walk(v)
-        elif isinstance(value, dict):
-            for v in value.values():
-                walk(v)
-
-    for node_id in document.ids():
-        walk(document.resolve(node_id))
-
-    # de-dupe while preserving order
-    out = []
-    seen = set()
-    for s in seen_strings:
-        if s not in seen:
-            seen.add(s)
-            out.append(s)
-    return out
